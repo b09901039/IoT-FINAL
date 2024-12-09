@@ -333,6 +333,10 @@ class VideoStreamApp:
 							continue
 
 						if frame is not None:
+
+							_, encoded_frame = cv2.imencode('.jpg', frame)
+							socketio.emit('video_frame', {'frame': encoded_frame.tobytes()})
+
 							frame = self.process_frame(frame)
 							image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
 							image = Image.fromarray(image)
@@ -345,8 +349,7 @@ class VideoStreamApp:
 							self.video_label.config(image=image, text="")
 							self.video_label.image = image
 
-							_, encoded_frame = cv2.imencode('.jpg', frame)
-							socketio.emit('video_frame', {'frame': encoded_frame.tobytes()})
+
 
 							self.frame_count += 1
 							elapsed_time = time.time() - self.start_time

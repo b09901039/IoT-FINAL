@@ -8,7 +8,9 @@ from tkinter import messagebox
 from PIL import Image, ImageTk
 import mido
 import threading
-
+import queue
+import os
+import signal
 from flask import Flask
 from flask_socketio import SocketIO
 
@@ -64,8 +66,18 @@ class VideoStreamApp:
 		self.setup_ui()
 
 		self.stopEvent = threading.Event()
-		self.video_thread = threading.Thread(target=self.videoLoop, args=())
-		self.video_thread.start()
+		self.stopVideoEvent = threading.Event()
+		# self.stop = False
+		# self.video_thread = threading.Thread(target=self.videoLoop, args=())
+		# self.video_thread.start()	
+
+		self.video_frame_queue = queue.Queue()
+		self.video_frame_lock = threading.Lock()
+
+		self.video_record_thread = threading.Thread(target=self.videorecordLoop, args=())
+		self.video_record_thread.start()		
+		self.video_display_thread = threading.Thread(target=self.videodisplayLoop, args=())
+		self.video_display_thread.start()
 
 		self.flask_thread = threading.Thread(target=self.run_flask_server, daemon=True)
 		self.flask_thread.start() 
@@ -213,7 +225,7 @@ class VideoStreamApp:
 		return f"{note}{octave}"
 
 	def connect(self):
-		while self.stream is None: # and not self.stopEvent.is_set():
+		while self.stream is None and not self.stopEvent.is_set():
 			try:
 				self.stream = requests.get(f"{self.stream_url}/video", stream=True, timeout=5)
 				if self.stream.status_code != 200:
@@ -236,71 +248,77 @@ class VideoStreamApp:
 		return blur_score < threshold
 
 	def process_frame(self, frame):
-		frame = cv2.rotate(frame, cv2.ROTATE_180)
-		frame = cv2.flip(frame, 1)
+		try: 
+			frame = cv2.rotate(frame, cv2.ROTATE_180)
+			frame = cv2.flip(frame, 1)
+			frame = cv2.flip(frame, 0)
+			frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+			if self.is_recording:						
+				if self.out is None:
+					current_datetime = datetime.now().strftime("%Y-%m-%d--%H-%M-%S")
+					output_filename = f"output {self.resolution[0]}x{self.resolution[1]} {self.fps_video}fps {current_datetime}.mp4"
+					
+					self.out = cv2.VideoWriter(
+						output_filename,
+						self.fourcc,
+						self.fps, 
+						self.resolution
+					)
 
-		if self.is_recording:						
-			if self.out is None:
-				current_datetime = datetime.now().strftime("%Y-%m-%d--%H-%M-%S")
-				output_filename = f"output {self.resolution[0]}x{self.resolution[1]} {self.fps_video}fps {current_datetime}.mp4"
+			if self.is_recording:
+				self.out.write(frame)
+
+			frame = cv2.resize(frame, (self.frame_width, self.frame_height))
+
+			if self.is_recording:
+				cv2.putText(frame, "Recording...", (self.frame_width - 110, 40), cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 0, 255), 2, cv2.LINE_AA)
+
+
+
+			# if self.detect_motion_blur(frame):						
+			# 	self.motion_blur_time = time.time()
+			# if self.motion_blur_time is not None and time.time() - self.motion_blur_time < 1.0:
+			# 	cv2.putText(frame, "Motion blur detected!", (self.frame_width//2-0, 40), cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 0, 255), 2, cv2.LINE_AA)
+			# 	# print("Motion blur detected!")
+			# else:
+			# 	self.motion_blur_time = None 
 				
-				self.out = cv2.VideoWriter(
-					output_filename,
-					self.fourcc,
-					# 15, 
-					self.fps_video, 
-					self.resolution
-				)
+			if self.midi_in:
+				for msg in self.midi_in.iter_pending():
+					if msg.type == 'note_on' and msg.velocity > 0:  # Key pressed
+						note_name = self.midi_to_note_name(msg.note)
+						self.active_notes.add(note_name)
+					elif msg.type in ('note_off', 'note_on') and msg.velocity == 0:  # Key released
+						note_name = self.midi_to_note_name(msg.note)
+						self.active_notes.discard(note_name)
 
-		if self.is_recording:
-			self.out.write(frame)
-			cv2.putText(frame, "Recording...", (self.resolution[0]//2 - 110, 40), cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 0, 255), 2, cv2.LINE_AA)
+				if self.active_notes:
+					text_thickness = 2
+					text_scale = 1
+					notes_text = " ".join(sorted(self.active_notes))  
+					(text_width, text_height), _ = cv2.getTextSize(notes_text, cv2.FONT_HERSHEY_SIMPLEX, text_scale, text_thickness)
 
+					x = (self.frame_width - text_width) // 2
+					y = 450 # (frame_height + text_height) // 2  
+					
+					cv2.putText(
+						frame, 
+						notes_text, 
+						(x, y), 
+						cv2.FONT_HERSHEY_DUPLEX, 
+						text_scale, (255, 255, 255), 
+						text_thickness, 
+						cv2.LINE_AA,
+					)
 
-		frame = cv2.resize(frame, (self.frame_width, self.frame_height))
+			fps_text = f"{self.fps:3.0f} FPS"
+			cv2.putText(frame, fps_text, (self.frame_width - 80, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-		# if self.detect_motion_blur(frame):						
-		# 	self.motion_blur_time = time.time()
-		# if self.motion_blur_time is not None and time.time() - self.motion_blur_time < 1.0:
-		# 	cv2.putText(frame, "Motion blur detected!", (self.frame_width//2-0, 40), cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 0, 255), 2, cv2.LINE_AA)
-		# 	# print("Motion blur detected!")
-		# else:
-		# 	self.motion_blur_time = None 
 			
-		if self.midi_in:
-			for msg in self.midi_in.iter_pending():
-				if msg.type == 'note_on' and msg.velocity > 0:  # Key pressed
-					note_name = self.midi_to_note_name(msg.note)
-					self.active_notes.add(note_name)
-				elif msg.type in ('note_off', 'note_on') and msg.velocity == 0:  # Key released
-					note_name = self.midi_to_note_name(msg.note)
-					self.active_notes.discard(note_name)
+			return frame
+		except Exception as e:
+			print(f"process_frame error: {e}")
 
-			if self.active_notes:
-				text_thickness = 2
-				text_scale = 1
-				notes_text = " ".join(sorted(self.active_notes))  
-				(text_width, text_height), _ = cv2.getTextSize(notes_text, cv2.FONT_HERSHEY_SIMPLEX, text_scale, text_thickness)
-
-				x = (self.frame_width - text_width) // 2
-				y = 450 # (frame_height + text_height) // 2  
-				
-				cv2.putText(
-					frame, 
-					notes_text, 
-					(x, y), 
-					cv2.FONT_HERSHEY_DUPLEX, 
-					text_scale, (255, 255, 255), 
-					text_thickness, 
-					cv2.LINE_AA,
-				)
-
-		fps_text = f"{self.fps:3.0f} FPS"
-		cv2.putText(frame, fps_text, (self.frame_width - 80, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-		
-		return frame
-	
 	def videoLoop(self):
 		last_frame_time = 0
 		while not self.stopEvent.is_set():
@@ -362,6 +380,86 @@ class VideoStreamApp:
 					text="Video Feed Disconnected",
 					compound='center',
 				)
+	
+	def videodisplayLoop(self):
+		print(f'videodisplayLoop')
+		while not self.stopEvent.is_set():
+			try:
+				frame = self.video_frame_queue.get()
+				if frame is not None:
+
+					_, encoded_frame = cv2.imencode('.jpg', frame)
+					socketio.emit('video_frame', {'frame': encoded_frame.tobytes()})
+
+					image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+					image = Image.fromarray(image)
+					image = ImageTk.PhotoImage(image)
+
+					# self.video_label.config(
+					# 	width=self.frame_width, 
+					# 	height=self.frame_height
+					# )							
+					self.video_label.config(image=image, text="")
+					self.video_label.image = image
+
+					self.frame_count += 1
+					elapsed_time = time.time() - self.start_time
+					if elapsed_time >= 1.0:
+						self.fps = self.frame_count
+						self.frame_count = 0
+						self.start_time = time.time()
+						print(f"self.fps: {self.fps}")
+
+			except requests.exceptions.RequestException as e:
+				print(f"videodisplayLoop error: {e}")
+				self.stream = None
+				self.video_label.config(
+					image=self.default_placeholder_image,
+					text="Video Feed Disconnected",
+					compound='center',
+				)
+
+
+	def videorecordLoop(self):
+		print(f'videorecordLoop')
+		while not self.stopEvent.is_set():
+			try:
+				if self.stream is None:
+					self.video_label.config(
+						image=self.default_placeholder_image,
+						text="Loading Video Feed...",
+						compound='center',
+					)
+					self.connect()
+					continue
+
+				for chunk in self.stream.iter_content(chunk_size=4096):
+					if self.stopEvent.is_set():
+						break
+					self.byte_buffer += chunk
+					start_index = self.byte_buffer.find(b'\xff\xd8')
+					end_index = self.byte_buffer.find(b'\xff\xd9')
+
+					if start_index != -1 and end_index != -1:
+						jpg_frame = self.byte_buffer[start_index:end_index + 2]
+						self.byte_buffer = self.byte_buffer[end_index + 2:]
+
+						frame = cv2.imdecode(np.frombuffer(jpg_frame, np.uint8), cv2.IMREAD_COLOR)
+						if frame is not None:
+							frame = self.process_frame(frame)
+							# self.video_frame_lock.acquire()
+							self.video_frame_queue.put(frame)
+							# self.video_frame_lock.release()
+							
+
+			except requests.exceptions.RequestException as e:
+				print(f"videorecordLoop error: {e}")
+				self.stream = None
+				self.video_label.config(
+					image=self.default_placeholder_image,
+					text="Video Feed Disconnected",
+					compound='center',
+				)
 
 
 	def toggle_recording(self):
@@ -375,26 +473,32 @@ class VideoStreamApp:
 				self.out = None
 
 	def quit_app(self):
-		print("Closing application...")
+		print("Closing...")
+		self.video_label.config(
+			image=self.default_placeholder_image,
+			text="Closing...",
+			compound='center',
+		)
+		self.root.update_idletasks() 
 		try:
 			self.stopEvent.set()
-			if self.video_thread.is_alive():
-				self.video_thread.join(timeout=5) 
-			if self.flask_thread.is_alive():
-				self.flask_thread.join(timeout=5) 
+			# if self.video_thread.is_alive():
+			# 	self.video_thread.join(timeout=5) 
+			if self.video_display_thread.is_alive():
+				self.video_display_thread.join(5) 
+			if self.video_record_thread.is_alive():
+				self.video_record_thread.join(5) 
 			if self.stream:
 				self.stream.close()
 			if self.out:
 				self.out.release()
 				self.out = None
+
+			if self.root:
+				self.root.destroy()
+
 		except Exception as e:
 			print(f"Error closing stream: {e}")
-
-		if self.root:
-			try:
-				self.root.destroy()
-			except Exception as e:
-				print(f"Error destroying root: {e}")
 
 		print("Application closed.")
 
@@ -409,3 +513,4 @@ if __name__ == "__main__":
 	root = tk.Tk()
 	app = VideoStreamApp(root, stream_url)
 	root.mainloop()
+	os.kill(os.getpid(), signal.SIGTERM)

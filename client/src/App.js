@@ -6,7 +6,7 @@ const App = () => {
   const videoRef = useRef(null);
 
   useEffect(() => {
-    const socket = io('http://192.168.188.41:5001'); // Ensure the backend is running at this address and port
+    const socket = io('http://192.168.188.29:5001'); // Ensure the backend is running at this address and port
 
     socket.on('video_frame', (data) => {
       if (videoRef.current) {

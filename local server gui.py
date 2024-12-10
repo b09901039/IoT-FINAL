@@ -27,14 +27,12 @@ class VideoStreamApp:
 
 
 		self.fps_video = 30
-
+		# self.target_frame_interval = 0.06
+	
 		self.frame_width = 640
 		self.frame_height = 480
 
-		self.resolution = "1296x972"
-		# self.frame_width = 1296
-		# self.frame_height = 972
-
+		self.resolution = (self.frame_width, self.frame_height)
 
 		self.motion_blur_time = None
 		self.fps = 0
@@ -173,12 +171,15 @@ class VideoStreamApp:
 
 	def change_resolution(self, selected_resolution):
 		width, height = map(int, selected_resolution.split("x"))
-		new_resolution = (width, height)
-		print(f"Changing resolution to: {new_resolution}")
+		self.resolution = (width, height)
+		print(f"Changing resolution to: {self.resolution}")
 
-		# Send a request to the RPi server to update resolution
+		if width == 640:
+			self.fps_video = 30
+		elif width == 1296:
+			self.fps_video = 20
 		try:
-			response = requests.post(f"http://{IP}:5000/change_resolution", json={"width": width, "height": height})
+			response = requests.post(f"{self.stream_url}/change_resolution", json={"width": width, "height": height})
 			if response.status_code == 200:
 				print("Resolution updated successfully on RPi server.")
 			else:
@@ -206,17 +207,15 @@ class VideoStreamApp:
 				print(f"Failed to open MIDI device '{selected_device}': {e}")
 				self.midi_in = None
 
-
 	def midi_to_note_name(self, midi_number):
 		octave = midi_number // 12 - 1   
 		note = self.note_names[midi_number % 12] 
 		return f"{note}{octave}"
 
 	def connect(self):
-
 		while self.stream is None: # and not self.stopEvent.is_set():
 			try:
-				self.stream = requests.get(self.stream_url, stream=True, timeout=5)
+				self.stream = requests.get(f"{self.stream_url}/video", stream=True, timeout=5)
 				if self.stream.status_code != 200:
 					raise ConnectionError(f"Failed to connect to stream. Status code: {self.stream.status_code}")
 				else:
@@ -240,24 +239,22 @@ class VideoStreamApp:
 		frame = cv2.rotate(frame, cv2.ROTATE_180)
 		frame = cv2.flip(frame, 1)
 
-		if self.is_recording:
-			cv2.putText(frame, "Recording...", (self.frame_width - 110, 40), cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 0, 255), 2, cv2.LINE_AA)
-						
+		if self.is_recording:						
 			if self.out is None:
 				current_datetime = datetime.now().strftime("%Y-%m-%d--%H-%M-%S")
-
+				output_filename = f"output {self.resolution[0]}x{self.resolution[1]} {self.fps_video}fps {current_datetime}.mp4"
 				
-				# output_filename = f"output {self.fps_video}fps{current_datetime}.mp4"
-				output_filename = f"output {self.fps_video}fps {self.resolution} {current_datetime}.mp4"
 				self.out = cv2.VideoWriter(
 					output_filename,
 					self.fourcc,
-					fps=20, 
-					frameSize=(1296, 972)
+					# 15, 
+					self.fps_video, 
+					self.resolution
 				)
 
 		if self.is_recording:
 			self.out.write(frame)
+			cv2.putText(frame, "Recording...", (self.resolution[0]//2 - 110, 40), cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 0, 255), 2, cv2.LINE_AA)
 
 
 		frame = cv2.resize(frame, (self.frame_width, self.frame_height))
@@ -305,6 +302,7 @@ class VideoStreamApp:
 		return frame
 	
 	def videoLoop(self):
+		last_frame_time = 0
 		while not self.stopEvent.is_set():
 			try:
 				if self.stream is None:
@@ -316,7 +314,7 @@ class VideoStreamApp:
 					)
 					continue
 
-				for chunk in self.stream.iter_content(chunk_size=1024):
+				for chunk in self.stream.iter_content(chunk_size=4096):
 					if self.stopEvent.is_set():
 						break
 					self.byte_buffer += chunk
@@ -348,8 +346,6 @@ class VideoStreamApp:
 							# )							
 							self.video_label.config(image=image, text="")
 							self.video_label.image = image
-
-
 
 							self.frame_count += 1
 							elapsed_time = time.time() - self.start_time
@@ -407,8 +403,8 @@ def index():
     return "Flask server is running!"
 
 if __name__ == "__main__":
-	IP = '192.168.188.100'
-	stream_url = f"http://{IP}:5000/video"
+	rpiIP = '192.168.188.100'
+	stream_url = f"http://{rpiIP}:5000"
 
 	root = tk.Tk()
 	app = VideoStreamApp(root, stream_url)

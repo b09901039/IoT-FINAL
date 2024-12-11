@@ -332,7 +332,8 @@ class VideoStreamApp:
 					)
 					continue
 
-				for chunk in self.stream.iter_content(chunk_size=4096):
+				# for chunk in self.stream.iter_content(chunk_size=4096):
+				for chunk in self.stream.iter_content(chunk_size=1024):
 					if self.stopEvent.is_set():
 						break
 					self.byte_buffer += chunk

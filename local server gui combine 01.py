@@ -14,6 +14,10 @@ import signal
 from flask import Flask
 from flask_socketio import SocketIO
 
+
+from utils import get_frame_from_photo, process_frame
+from utils import crop_keyboard
+
 FlaskApp = Flask(__name__)
 socketio = SocketIO(FlaskApp, cors_allowed_origins="*")
 
@@ -27,15 +31,11 @@ class VideoStreamApp:
 		self.is_recording = False
 		self.out = None
 
-
-		self.fps_video = 30
-	
+		self.fps_video = 30	
 		self.frame_width = 640
 		self.frame_height = 480
-
 		self.resolution = (self.frame_width, self.frame_height)
 		self.source = "realtime"
-
 		self.motion_blur_time = None
 		self.fps = 0
 		self.frame_count = 0
@@ -43,7 +43,6 @@ class VideoStreamApp:
 		self.running = True
 
 		self.fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
-
 		self.frame = None	
 		self.stream = None
 		self.byte_buffer = b''
@@ -53,6 +52,11 @@ class VideoStreamApp:
 			'C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'
 		]		
 		
+		# For hand analyse
+		self.keyboards = []
+
+
+
 		self.active_notes = set()
 		self.midi_in = None
 		self.available_midi_devices = mido.get_input_names()
@@ -61,25 +65,26 @@ class VideoStreamApp:
 		self.default_placeholder_image = ImageTk.PhotoImage(
 			Image.new('RGB', (self.frame_width, self.frame_height), color='gray')
 		)
-
 		self.setup_ui()
 
-		self.stopEvent = threading.Event()
-		self.stopVideoEvent = threading.Event()
-		# self.stop = False
-		# self.video_thread = threading.Thread(target=self.videoLoop, args=())
-		# self.video_thread.start()	
+		try:
+			self.stopEvent = threading.Event()
+			self.stopVideoEvent = threading.Event()
+			# self.stop = False
+			# self.video_thread = threading.Thread(target=self.videoLoop, args=())
+			# self.video_thread.start()	
 
-		self.video_frame_queue = queue.Queue()
-		self.video_frame_lock = threading.Lock()
+			self.video_frame_queue = queue.Queue()
+			self.video_frame_lock = threading.Lock()
 
-		self.video_record_thread = threading.Thread(target=self.videorecordLoop, args=())
-		self.video_record_thread.start()		
-		self.video_display_thread = threading.Thread(target=self.videodisplayLoop, args=())
-		self.video_display_thread.start()
+			self.video_record_thread = threading.Thread(target=self.videorecordLoop, args=())
+			self.video_record_thread.start()		
+			self.video_display_thread = threading.Thread(target=self.videodisplayLoop, args=())
+			self.video_display_thread.start()
 
-		self.flask_thread = threading.Thread(target=self.run_flask_server, daemon=True)
-		self.flask_thread.start() 
+			self.flask_thread = threading.Thread(target=self.run_flask_server, daemon=True)
+			self.flask_thread.start() 
+		except ValueError as e:	print(f'ValueError: {e}')
 
 	def run_flask_server(self):
 		socketio.run(FlaskApp, host="0.0.0.0", port=5001)
@@ -274,10 +279,27 @@ class VideoStreamApp:
 
 	def process_frame(self, frame):
 		try: 
+			
 			frame = cv2.rotate(frame, cv2.ROTATE_180)
 			frame = cv2.flip(frame, 1)
 			frame = cv2.flip(frame, 0)
 			frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+
+			# ====== HERE STARTS THE COMBINATION ====== #
+			# Crop keyboard
+			# keyboard, _, _ = crop_keyboard(frame)
+			valid, keyboard_info = crop_keyboard(frame)
+			if valid:
+				keyboard = keyboard_info[0]
+				print(f'keyboard resize: {(int(keyboard.shape[1] * 256 / keyboard.shape[0]), 256)}')
+				keyboard = cv2.resize(keyboard, (int(keyboard.shape[1] * 256 / keyboard.shape[0]), 256))
+				self.keyboards.append(keyboard)
+
+
+			# ====== HERE ENDS THE COMBINATION ====== #
+
+
 			if self.is_recording:						
 				if self.out is None:
 					current_datetime = datetime.now().strftime("%Y-%m-%d--%H-%M-%S")
@@ -344,69 +366,6 @@ class VideoStreamApp:
 		except Exception as e:
 			print(f"process_frame error: {e}")
 
-	def videoLoop(self):
-		last_frame_time = 0
-		while not self.stopEvent.is_set():
-			try:
-				if self.stream is None:
-					self.connect()
-					self.video_label.config(
-						image=self.default_placeholder_image,
-						text="Loading Video Feed...",
-						compound='center',
-					)
-					continue
-
-				# for chunk in self.stream.iter_content(chunk_size=4096):
-				for chunk in self.stream.iter_content(chunk_size=1024):
-					if self.stopEvent.is_set():
-						break
-					self.byte_buffer += chunk
-					start_index = self.byte_buffer.find(b'\xff\xd8')
-					end_index = self.byte_buffer.find(b'\xff\xd9')
-
-					if start_index != -1 and end_index != -1:
-						jpg_frame = self.byte_buffer[start_index:end_index + 2]
-						self.byte_buffer = self.byte_buffer[end_index + 2:]
-						try:
-							frame = cv2.imdecode(np.frombuffer(jpg_frame, np.uint8), cv2.IMREAD_COLOR)
-						except Exception as e:
-							print(f"Failed to decode frame: {e}")
-							continue
-
-						if frame is not None:
-
-							_, encoded_frame = cv2.imencode('.jpg', frame)
-							socketio.emit('video_frame', {'frame': encoded_frame.tobytes()})
-
-							frame = self.process_frame(frame)
-							image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
-							image = Image.fromarray(image)
-							image = ImageTk.PhotoImage(image)
-
-							# self.video_label.config(
-							# 	width=self.frame_width, 
-							# 	height=self.frame_height
-							# )							
-							self.video_label.config(image=image, text="")
-							self.video_label.image = image
-
-							self.frame_count += 1
-							elapsed_time = time.time() - self.start_time
-							if elapsed_time >= 1.0:
-								self.fps = self.frame_count
-								self.frame_count = 0
-								self.start_time = time.time()
-
-			except requests.exceptions.RequestException as e:
-				print(f"Stream error: {e}")
-				self.stream = None
-				self.video_label.config(
-					image=self.default_placeholder_image,
-					text="Video Feed Disconnected",
-					compound='center',
-				)
-	
 	def videodisplayLoop(self):
 		print(f'videodisplayLoop')
 		while not self.stopEvent.is_set():
@@ -444,7 +403,6 @@ class VideoStreamApp:
 					text="Video Feed Disconnected",
 					compound='center',
 				)
-
 
 	def videorecordLoop(self):
 		print(f'videorecordLoop')
